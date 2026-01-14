@@ -1,6 +1,14 @@
+const mongoose = require("mongoose");
 const Item = require("./item.model");
 const Category = require("../category/category.model");
 const Subcategory = require("../subcategory/subcategory.model");
+
+function toObjectId(id) {
+  if (!id) return null;
+  if (!mongoose.Types.ObjectId.isValid(id)) return null;
+  return new mongoose.Types.ObjectId(id);
+}
+
 
 async function assertParentExists({ categoryId, subcategoryId }) {
   if (categoryId) {
@@ -36,40 +44,41 @@ async function createItem(payload) {
 async function listItems({
   page = 1,
   limit = 10,
-  sortBy = "createdAt",
+  sortBy = "createdAt", // name | createdAt | price
   sortOrder = "desc",
   activeOnly,
   categoryId,
   subcategoryId,
   q,
+  minPrice,
+  maxPrice,
+  taxApplicable,
 } = {}) {
-  const match = {};
-  if (categoryId) match.categoryId = categoryId;
-  if (subcategoryId) match.subcategoryId = subcategoryId;
+  const skip = (Number(page) - 1) * Number(limit);
+  const sortDir = sortOrder === "asc" ? 1 : -1;
 
-  // optional text search
+  const match = {};
+
+  const categoryObjId = toObjectId(categoryId);
+  const subcategoryObjId = toObjectId(subcategoryId);
+
+  // Filter by subcategory (direct)
+  if (subcategoryId) {
+    if (!subcategoryObjId) {
+      const err = new Error("Invalid subcategoryId");
+      err.statusCode = 400;
+      throw err;
+    }
+    match.subcategoryId = subcategoryObjId;
+  }
+
+  // Text search
   if (q) match.$text = { $search: q };
 
-  const skip = (Number(page) - 1) * Number(limit);
-  const sort = { [sortBy]: sortOrder === "asc" ? 1 : -1 };
-
-  // We use aggregation to apply parent active constraints in one query.
-  // This helps us satisfy "category inactive => items behave inactive" without updating each item row.
   const pipeline = [
     { $match: match },
 
-    // join category
-    {
-      $lookup: {
-        from: "categories",
-        localField: "categoryId",
-        foreignField: "_id",
-        as: "cat",
-      },
-    },
-    { $unwind: { path: "$cat", preserveNullAndEmptyArrays: true } },
-
-    // join subcategory
+    // join subcategory first (needed to resolve category for subcategory-items)
     {
       $lookup: {
         from: "subcategories",
@@ -80,17 +89,55 @@ async function listItems({
     },
     { $unwind: { path: "$sub", preserveNullAndEmptyArrays: true } },
 
-    // derive effectiveIsActive
+    // Resolve categoryId for BOTH types of items:
+    // - If item.categoryId exists -> use it
+    // - Else use sub.categoryId (subcategory parent)
+    {
+      $addFields: {
+        resolvedCategoryId: { $ifNull: ["$categoryId", "$sub.categoryId"] },
+      },
+    },
+
+    // join category using resolvedCategoryId
+    {
+      $lookup: {
+        from: "categories",
+        localField: "resolvedCategoryId",
+        foreignField: "_id",
+        as: "cat",
+      },
+    },
+    { $unwind: { path: "$cat", preserveNullAndEmptyArrays: true } },
+
+    // Now category filter works for both direct-category items AND subcategory-items
+    ...(categoryId
+      ? [
+          (() => {
+            if (!categoryObjId) {
+              const err = new Error("Invalid categoryId");
+              err.statusCode = 400;
+              throw err;
+            }
+            return { $match: { resolvedCategoryId: categoryObjId } };
+          })(),
+        ]
+      : []),
+
+    // effective active:
+    // - item active
+    // - category active
+    // - if has subcategory, subcategory must be active too
     {
       $addFields: {
         effectiveIsActive: {
           $and: [
             "$is_active",
+            "$cat.is_active",
             {
               $cond: [
-                { $ifNull: ["$subcategoryId", false] }, // if subcategoryId exists
-                { $and: ["$sub.is_active", "$cat.is_active"] },
-                "$cat.is_active",
+                { $ifNull: ["$subcategoryId", false] },
+                "$sub.is_active",
+                true,
               ],
             },
           ],
@@ -99,22 +146,117 @@ async function listItems({
     },
   ];
 
+  // activeOnly filter
   if (activeOnly === true) {
     pipeline.push({ $match: { effectiveIsActive: true } });
   }
 
-  pipeline.push(
-    { $sort: sort },
-    { $skip: skip },
-    { $limit: Number(limit) }
-  );
+  // taxApplicable filter using inheritance:
+  // if sub.tax_applicable != null => use it, else category.tax_applicable
+  if (taxApplicable === true || taxApplicable === false) {
+    pipeline.push({
+      $addFields: {
+        effectiveTaxApplicable: {
+          $cond: [
+            { $ne: ["$sub.tax_applicable", null] },
+            "$sub.tax_applicable",
+            "$cat.tax_applicable",
+          ],
+        },
+      },
+    });
+    pipeline.push({ $match: { effectiveTaxApplicable: taxApplicable } });
+  }
 
-  const countPipeline = pipeline
-    .filter((st) => !("$skip" in st || "$limit" in st || "$sort" in st))
-    .concat([{ $count: "total" }]);
+  // sortablePrice (STATIC/COMPLIMENTARY/DISCOUNTED only)
+  pipeline.push({
+    $addFields: {
+      sortablePrice: {
+        $switch: {
+          branches: [
+            { case: { $eq: ["$pricing_type", "STATIC"] }, then: "$pricing_config.price" },
+            { case: { $eq: ["$pricing_type", "COMPLIMENTARY"] }, then: 0 },
+            {
+              case: { $eq: ["$pricing_type", "DISCOUNTED"] },
+              then: {
+                $let: {
+                  vars: {
+                    base: "$pricing_config.base_price",
+                    dtype: "$pricing_config.discount_type",
+                    dval: "$pricing_config.discount_value",
+                  },
+                  in: {
+                    $max: [
+                      0,
+                      {
+                        $subtract: [
+                          "$$base",
+                          {
+                            $cond: [
+                              { $eq: ["$$dtype", "FLAT"] },
+                              "$$dval",
+                              {
+                                $cond: [
+                                  { $eq: ["$$dtype", "PERCENT"] },
+                                  { $divide: [{ $multiply: ["$$base", "$$dval"] }, 100] },
+                                  0,
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ],
+          default: null,
+        },
+      },
+    },
+  });
+
+  // price range
+  if (minPrice !== undefined || maxPrice !== undefined) {
+    const pr = {};
+    if (minPrice !== undefined) pr.$gte = Number(minPrice);
+    if (maxPrice !== undefined) pr.$lte = Number(maxPrice);
+
+    pipeline.push({
+      $match: { sortablePrice: { $ne: null, ...pr } },
+    });
+  }
+
+  // sorting
+  const sortStage = {};
+  if (sortBy === "name") sortStage.name = sortDir;
+  else if (sortBy === "createdAt") sortStage.createdAt = sortDir;
+  else if (sortBy === "price") {
+    sortStage.sortablePrice = sortDir;
+    sortStage.createdAt = -1;
+  } else {
+    sortStage.createdAt = -1;
+  }
+
+  const dataPipeline = [
+    ...pipeline,
+    { $sort: sortStage },
+    { $skip: skip },
+    { $limit: Number(limit) },
+    {
+      $project: {
+        cat: 0,
+        sub: 0,
+      },
+    },
+  ];
+
+  const countPipeline = [...pipeline, { $count: "total" }];
 
   const [items, countRes] = await Promise.all([
-    Item.aggregate(pipeline),
+    Item.aggregate(dataPipeline),
     Item.aggregate(countPipeline),
   ]);
 

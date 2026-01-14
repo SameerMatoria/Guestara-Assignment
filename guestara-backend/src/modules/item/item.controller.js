@@ -21,7 +21,19 @@ async function create(req, res, next) {
 
 async function list(req, res, next) {
   try {
-    const { page, limit, sortBy, sortOrder, activeOnly, categoryId, subcategoryId, q } = req.query;
+    const {
+      page,
+      limit,
+      sortBy,
+      sortOrder,
+      activeOnly,
+      categoryId,
+      subcategoryId,
+      q,
+      minPrice,
+      maxPrice,
+      taxApplicable,
+    } = req.query;
 
     const data = await service.listItems({
       page,
@@ -32,6 +44,9 @@ async function list(req, res, next) {
       categoryId,
       subcategoryId,
       q,
+      minPrice,
+      maxPrice,
+      taxApplicable: taxApplicable !== undefined ? parseBool(taxApplicable) : undefined,
     });
 
     res.json(data);
@@ -39,6 +54,7 @@ async function list(req, res, next) {
     next(err);
   }
 }
+
 
 async function getById(req, res, next) {
   try {
