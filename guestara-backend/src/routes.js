@@ -16,5 +16,7 @@ router.use("/items", require("./modules/item/item.routes"));
 
 router.use("/", require("./modules/pricing/pricing.routes"));
 
+router.use("/", require("./modules/booking/booking.routes"));
+
 
 module.exports = router;

@@ -1,5 +1,29 @@
 const mongoose = require("mongoose");
 
+const AvailabilitySlotSchema = new mongoose.Schema(
+  {
+    start: { type: String, required: true }, // "HH:MM"
+    end: { type: String, required: true },   // "HH:MM"
+  },
+  { _id: false }
+);
+
+const AvailabilitySchema = new mongoose.Schema(
+  {
+    days: {
+      type: [String],
+      default: [],
+      enum: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+    },
+    slots: {
+      type: [AvailabilitySlotSchema],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
+
 const ItemSchema = new mongoose.Schema(
   {
     // Parent rule: exactly one must be set
@@ -43,7 +67,7 @@ const ItemSchema = new mongoose.Schema(
 
     // Optional: booking + addons
     is_bookable: { type: Boolean, default: false },
-    availability: { type: mongoose.Schema.Types.Mixed, default: null },
+    availability: { type: AvailabilitySchema, default: null },
 
     // simple flexible structure:
     // [{ id, name, price, is_mandatory, groupId? }]
