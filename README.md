@@ -1,123 +1,258 @@
-# Guestara-Assignment
+# Guestara – Menu, Pricing & Booking Backend
 
-Node/Express + MongoDB backend for menu catalog, pricing, and bookings.
+A Node.js + Express + MongoDB backend that models a real-world restaurant / services catalog with
+categories, items, pricing logic, availability, bookings, and add-ons.
 
-## Project layout
+This project focuses on **business logic and system design**, not just CRUD APIs.
 
-```
+---
+
+## 🧱 Architecture Overview
+
+The application follows a **modular, layered architecture**:
+
+- **Routes** → request/response handling
+- **Controllers** → input handling & orchestration
+- **Services** → core business logic
+- **Models** → data schemas & constraints
+
+This separation makes the codebase:
+- easier to reason about
+- easier to test
+- easier to extend
+
+```text
 guestara-backend/
-  src/
-    app.js
-    server.js
-    routes.js
-    config/db.js
-    modules/
-      category/
-      subcategory/
-      item/
-      pricing/
-      booking/
+└── src/
+    ├── app.js           # Express app config
+    ├── server.js        # Server bootstrap
+    ├── routes.js        # API route registry
+    ├── config/
+    │   └── db.js        # MongoDB connection
+    └── modules/
+        ├── category/
+        ├── subcategory/
+        ├── item/
+        ├── pricing/
+        └── booking/
 ```
 
-## Requirements
+---
 
-- Node.js 18+
-- MongoDB
+## 🗄️ Database Choice
 
-## Setup
+**MongoDB (via Mongoose)** was chosen because:
 
-1) Create `.env` in `guestara-backend/`:
+- The data model is hierarchical (Category → Subcategory → Item)
+- Pricing rules vary by item (dynamic schemas fit well)
+- Flexible querying is needed for search and filters
+- MongoDB aggregation pipelines are useful for computed fields
 
-```
+The system is scoped to a **single restaurant**, so no `restaurantId` abstraction is used.
+
+---
+
+## ⚙️ Setup & Running
+
+### Requirements
+- Node.js **18+**
+- MongoDB (local or Atlas)
+
+### Environment
+Create `.env` in `guestara-backend/`:
+
+```env
 MONGO_URI=mongodb://localhost:27017/guestara
 PORT=4000
 NODE_ENV=development
 ```
 
-2) Install and run:
+### Install & Run
 
-```
+```bash
 cd guestara-backend
 npm install
 npm run dev
 ```
 
-The API runs at `http://localhost:4000/api`.
+**API base URL:**
+`http://localhost:4000/api`
 
-## Scripts
+### 📜 Scripts
 
-- `npm run dev` - start with nodemon
-- `npm start` - start server
-- `npm run reset:indexes` - drop and rebuild category/subcategory/item indexes
+| Script | Description |
+| :--- | :--- |
+| `npm run dev` | Start server with nodemon |
+| `npm start` | Production start |
 
-## API
+---
 
-Base path: `/api`
+## 📦 Core Data Model
 
-### Health
+### Category
+- Unique globally (single restaurant)
+- Can define tax:
+  - `tax_applicable`
+  - `tax_percentage`
+- Soft delete via `is_active`
 
-- `GET /health`
+### Subcategory
+- Belongs to a **category**
+- Name unique within its category
+- Tax behavior:
+  - `tax_applicable = null` → inherit from category
+  - `true` / `false` → override category tax
 
-### Categories
+### Item
+- Belongs to exactly one: `categoryId` **OR** `subcategoryId`
+- Name unique under the same parent
+- Supports:
+  - multiple pricing strategies
+  - optional booking
+  - add-ons
 
-- `POST /categories`
-- `GET /categories` (query: `page`, `limit`, `sortBy`, `sortOrder`, `activeOnly`)
-- `GET /categories/:id`
-- `PATCH /categories/:id`
-- `DELETE /categories/:id` (soft delete)
+---
 
-### Subcategories
+## 🧠 Tax Inheritance (Critical Design)
 
-- `POST /subcategories`
-- `GET /subcategories` (query: `page`, `limit`, `sortBy`, `sortOrder`, `activeOnly`, `categoryId`)
-- `GET /subcategories/:id`
-- `PATCH /subcategories/:id`
-- `DELETE /subcategories/:id` (soft delete)
+Tax is **not** stored on items. Instead, tax is resolved dynamically at runtime:
 
-### Items
+1. **If item belongs to a subcategory:**
+   - If subcategory has `tax_applicable` → use it
+   - Else → inherit from category
+2. **If item belongs directly to a category:**
+   - Use category tax
 
-- `POST /items`
-- `GET /items`
-  - query: `page`, `limit`, `sortBy`, `sortOrder`, `activeOnly`,
-    `categoryId`, `subcategoryId`, `q` (text search),
-    `minPrice`, `maxPrice`, `taxApplicable`
-- `GET /items/:id`
-- `PATCH /items/:id`
-- `DELETE /items/:id` (soft delete)
+**Why this approach?**
+- Changing category tax automatically affects all dependent items
+- No mass updates or duplicated data
+- Clear inheritance chain
 
-### Pricing
+*This logic is implemented inside the pricing service, not the schema.*
 
-- `GET /items/:id/price`
-  - query: `durationHours` (tiered pricing)
-  - query: `time` (HH:MM) or `at` (ISO Date) for dynamic pricing
-  - query: `addons` (comma-separated addon ids)
+---
 
-### Booking
+## 💰 Pricing Engine
 
+Each item supports exactly **one** pricing type:
+
+### Pricing Types
+
+**1. Static**
+Fixed price:
+```json
+{ "price": 200 }
+```
+
+**2. Complimentary**
+Always free (price resolves to 0).
+
+**3. Discounted**
+Base price with discount:
+```json
+{
+  "base_price": 300,
+  "discount_type": "PERCENT",
+  "discount_value": 10
+}
+```
+Final price is never negative.
+
+**4. Tiered**
+Price depends on usage duration (uses `durationHours` at runtime):
+```json
+{
+  "tiers": [
+    { "upto": 1, "price": 300 },
+    { "upto": 2, "price": 500 }
+  ]
+}
+```
+
+**5. Dynamic (Time-based)**
+Price depends on time window:
+```json
+{
+  "windows": [
+    { "start": "08:00", "end": "11:00", "price": 199 }
+  ]
+}
+```
+Returns “not available” outside valid windows.
+
+### 🔎 Required Price Endpoint
+`GET /items/:id/price`
+
+This endpoint forces business logic correctness. It returns:
+- applied pricing rule
+- base price
+- discount (if any)
+- add-ons total
+- tax (with source)
+- final payable amount
+
+**Query parameters:**
+- `durationHours` → tiered pricing
+- `time` (HH:MM) or `at` (ISO date) → dynamic pricing
+- `addons` → comma-separated addon ids
+
+---
+
+## 📅 Availability & Booking
+
+Items can optionally be bookable.
+
+### Availability
+Defined on item:
+```json
+{
+  "days": ["MON", "TUE", "WED"],
+  "slots": [
+    { "start": "10:00", "end": "11:00" }
+  ]
+}
+```
+
+### Booking Rules
+- Slot must exist in availability
+- Item must be active
+- No overlapping bookings allowed
+- Exact-slot double booking prevented via DB index
+
+### APIs
 - `GET /items/:itemId/availability?date=YYYY-MM-DD`
 - `POST /items/:itemId/book`
-  - body: `{ "date": "YYYY-MM-DD", "startTime": "HH:MM", "endTime": "HH:MM", "notes": "" }`
 
-## Data model highlights
+---
 
-- `Category`: optional tax config (`tax_applicable`, `tax_percentage`).
-- `Subcategory`: can override tax, or inherit from parent category.
-- `Item`:
-  - belongs to exactly one parent: `categoryId` OR `subcategoryId`.
-  - `pricing_type`: `STATIC`, `TIERED`, `COMPLIMENTARY`, `DISCOUNTED`, `DYNAMIC`.
-  - `pricing_config`: pricing rules (shape depends on `pricing_type`).
-  - `is_bookable` + `availability` define booking slots.
+## 🔍 Search, Filtering & Pagination
 
-## Pricing behavior
+`GET /items` supports:
+- pagination (`page`, `limit`)
+- sorting (`name`, `createdAt`, `price`)
+- partial text search (`q`)
+- filters:
+  - `categoryId`
+  - `subcategoryId`
+  - `activeOnly`
+  - `taxApplicable`
+  - `minPrice`, `maxPrice`
 
-- Static: `pricing_config.price`
-- Complimentary: always `0`
-- Discounted: `base_price` with `discount_type` (`FLAT` or `PERCENT`)
-- Tiered: `tiers: [{ upto, price }]`, uses `durationHours`
-- Dynamic: `windows: [{ start, end, price }]`, uses `time` or `at`
+**Note:** Price sorting is deterministic for `STATIC`, `COMPLIMENTARY`, and `DISCOUNTED`. Tiered and dynamic prices depend on runtime context and are resolved via the price endpoint.
 
-## Booking behavior
+---
 
-- Uses configured availability slots per item.
-- Prevents overlapping confirmed bookings.
-- Returns availability with `available: true/false` per slot.
+## 🧪 Error Handling & Validation
+
+- Soft deletes via `is_active`
+- Defensive validation for ObjectIds
+- Clear error messages
+- Centralized error middleware
+
+---
+
+## 🧠 Tradeoffs & Simplifications
+
+- **Single-restaurant scope** (no `restaurantId`)
+- **Price sorting** excludes dynamic/tiered without context
+- **Authentication** not implemented (out of scope)
