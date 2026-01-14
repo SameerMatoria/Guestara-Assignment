@@ -1,6 +1,5 @@
 const router = require("express").Router();
 
-// Health check
 router.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -8,5 +7,14 @@ router.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+router.use("/categories", require("./modules/category/category.routes"));
+
+router.use("/subcategories", require("./modules/subcategory/subcategory.routes"));
+
+router.use("/items", require("./modules/item/item.routes"));
+
+router.use("/", require("./modules/pricing/pricing.routes"));
+
 
 module.exports = router;
