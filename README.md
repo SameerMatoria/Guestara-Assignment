@@ -62,7 +62,7 @@ The system is scoped to a **single restaurant**, so no `restaurantId` abstractio
 Create `.env` in `guestara-backend/`:
 
 ```env
-MONGO_URI=mongodb://localhost:27017/guestara
+MONGO_URI=YOUR_MONGO_URL
 PORT=4000
 NODE_ENV=development
 ```
