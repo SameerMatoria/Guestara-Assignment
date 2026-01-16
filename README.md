@@ -256,3 +256,7 @@ Defined on item:
 - **Single-restaurant scope** (no `restaurantId`)
 - **Price sorting** excludes dynamic/tiered without context
 - **Authentication** not implemented (out of scope)
+
+---
+
+Walkthorough explaination video - [Link](https://drive.google.com/file/d/1XF7HH2TPn0ywUwkCZpQf2L0jXV3El5ww/view?usp=drive_link)
